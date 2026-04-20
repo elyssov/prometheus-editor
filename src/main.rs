@@ -254,7 +254,7 @@ impl OrbitCamera {
             yaw: 0.5,
             pitch: 0.3,
             distance: 400.0,
-            target: Vec3::new(0.0, 140.0, 0.0),
+            target: Vec3::new(105.0, 141.0, 45.0), // center of human at scale=3
             fov: 45.0,
         }
     }
@@ -588,7 +588,8 @@ impl EditorState {
     fn new() -> Self {
         let scale = 3.0; // 3.0 = ~300 voxels tall, good detail
         let mut skeleton = Skeleton::human(scale);
-        skeleton.root_position = Vec3::new(0.0, 140.0, 0.0); // legs need room below
+        // Center body in positive coordinates: arms extend ~90 in X, legs ~130 in Y
+        skeleton.root_position = Vec3::new(scale * 35.0, scale * 47.0, scale * 15.0);
         skeleton.solve_forward();
         let body_profiles = Self::default_human_profiles(scale);
 
@@ -599,7 +600,7 @@ impl EditorState {
             mode: EditorMode::Skeleton,
             show_constraints: true,
             show_names: true,
-            show_voxels: false,
+            show_voxels: true,
             auto_rotate: false,
             skeleton_scale: scale,
             preset_name: "Human".to_string(),
@@ -614,7 +615,7 @@ impl EditorState {
         match name {
             "Human" => {
                 self.skeleton = Skeleton::human(scale);
-                self.skeleton.root_position = Vec3::new(0.0, scale * 47.0, 0.0);
+                self.skeleton.root_position = Vec3::new(scale * 35.0, scale * 47.0, scale * 15.0);
                 self.body_profiles = Self::default_human_profiles(scale);
             }
             "Cat" => {
@@ -1104,23 +1105,30 @@ impl App {
 
         let start = std::time::Instant::now();
 
-        // Grid 512: at scale=3.0, body ~300 voxels tall — good detail
-        let grid_size: usize = 512;
+        // Grid size adapts to scale: larger scale = more voxels = need bigger grid
         let scale = self.state.skeleton_scale;
+        let grid_size: usize = (scale * 170.0) as usize; // ~500 at scale 3.0
+        let grid_size = grid_size.clamp(128, 512);
+
+        println!("  [Body] Building SDF body (scale={:.1}, grid={})...", scale, grid_size);
+
         let sdf_body = if self.state.preset_name == "Human" {
             SdfBody::human_body(&self.state.skeleton, scale)
         } else {
-            // For cat/other, just skip for now
             self.body_gpu_mesh = None;
             self.body_needs_rebuild = false;
             return;
         };
+
+        let sdf_time = start.elapsed();
+        println!("  [Body] SDF created in {:.0}ms, rasterizing...", sdf_time.as_secs_f64() * 1000.0);
 
         // Sparse grid
         let mut voxels_map = std::collections::HashMap::new();
         let mut min = [u16::MAX; 3];
         let mut max = [0u16; 3];
 
+        let rast_start = std::time::Instant::now();
         sdf_body.rasterize(grid_size, 1.5, |x, y, z, mat, r, g, b| {
             voxels_map.insert((x as u16, y as u16, z as u16), Voxel::solid(mat, r, g, b));
             min[0] = min[0].min(x as u16);
@@ -1130,6 +1138,7 @@ impl App {
             max[1] = max[1].max(y as u16);
             max[2] = max[2].max(z as u16);
         });
+        println!("  [Body] Rasterized {} voxels in {:.0}ms", voxels_map.len(), rast_start.elapsed().as_secs_f64() * 1000.0);
 
         if voxels_map.is_empty() {
             self.body_gpu_mesh = None;
